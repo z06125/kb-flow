@@ -1,0 +1,58 @@
+services:
+  kb:
+    build:
+      context: ./server
+      args:
+        PIP_INDEX: https://mirrors.aliyun.com/pypi/simple/
+    env_file: .env
+    environment:
+      - KB_DB=/data/kb.db
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+    mem_limit: 512m
+
+  worker:
+    build:
+      context: ./server
+      args:
+        PIP_INDEX: https://mirrors.aliyun.com/pypi/simple/
+    command: ["python", "worker.py"]
+    env_file: .env
+    environment:
+      - KB_DB=/data/kb.db
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+    mem_limit: 384m
+
+  feeds:
+    build:
+      context: ./server
+      args:
+        PIP_INDEX: https://mirrors.aliyun.com/pypi/simple/
+    command: ["python", "scripts/fetch_feeds.py"]
+    env_file: .env
+    environment:
+      - KB_DB=/data/kb.db
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+    mem_limit: 384m
+
+  bot:
+    build:
+      context: ./server
+      args:
+        PIP_INDEX: https://mirrors.aliyun.com/pypi/simple/
+    command: ["python", "scripts/tg_bot.py"]
+    env_file: .env
+    environment:
+      - KB_DB=/data/kb.db
+      - TG_API_BASE=${TG_API_BASE:-https://api.telegram.org}
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+    mem_limit: 256m
