@@ -25,6 +25,7 @@ def main():
                 print(f"[worker] #{iid} done in {time.time()-t0:.1f}s", flush=True)
             except Exception as e:  # process_item 已写 error 状态
                 print(f"[worker] #{iid} ERROR: {e}", flush=True)
+            time.sleep(5)  # 温和限速，给交互查询留 API 余量
 
 
 if __name__ == "__main__":

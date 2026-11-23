@@ -217,8 +217,16 @@ def cmd_config(c):
     save_cfg(c)
 
 
+def cmd_kbq(c, args):
+    q = " ".join(args)
+    d = post(f"{c['server']}/v1/ask", {"q": q}, token=c["kb_token"], timeout=180)
+    print(d["answer"])
+    for n, s in enumerate(d.get("sources", []), 1):
+        print(f"[{n}] {s['title']}  {s.get('url') or ''}")
+
+
 CMDS = {"ask": cmd_ask, "sum": cmd_sum, "trans": cmd_trans,
-        "prompt": cmd_prompt, "kb": cmd_kb, "clip": cmd_clip,
+        "prompt": cmd_prompt, "kb": cmd_kb, "kbq": cmd_kbq, "clip": cmd_clip,
         "digest": cmd_digest, "stats": cmd_stats, "config": cmd_config}
 
 

@@ -135,7 +135,19 @@ def cjk_space(s: str) -> str:
 
 
 def fts_query(q: str) -> str:
-    return '"' + cjk_space(q).replace('"', '""') + '"'
+    """短查询按短语匹配；长查询拆 CJK 二字滑窗 OR 提升召回（向量限流时仍可检索）。"""
+    sq = cjk_space(q).replace('"', '""')
+    runs = re.findall(rf"[{_CJK}][{_CJK}]{{2,}}", q.replace(" ", ""))
+    if not runs:
+        return '"' + sq + '"'
+    grams, seen = [], set()
+    for r in runs:
+        for i in range(len(r) - 1):
+            g = r[i:i + 2]
+            if g not in seen:
+                seen.add(g)
+                grams.append(g)
+    return " OR ".join('"' + cjk_space(g) + '"' for g in grams[:20])
 
 
 def content_hash(url: str, text: str) -> str:
@@ -179,9 +191,19 @@ class VecIndex:
             self.ids.append(iid)
             self.mat = np.vstack([self.mat, vec.astype(np.float32)])
 
+    def _ensure(self):
+        """缓存与库内向量数不一致时自动重建（worker 运行在独立容器）。"""
+        try:
+            with get_db() as db:
+                n = db.execute("SELECT COUNT(*) c FROM items "
+                               "WHERE embedding IS NOT NULL").fetchone()["c"]
+            if n != len(self.ids) or self.dirty or self.mat is None:
+                self.load()
+        except Exception:
+            self.dirty = True
+
     def search(self, qvec: np.ndarray, k: int = 30) -> list[tuple[int, float]]:
-        if self.dirty or self.mat is None:
-            self.load()
+        self._ensure()
         with self.lock:
             if not self.ids:
                 return []
@@ -223,6 +245,19 @@ def _log_usage(kind: str, model: str, usage: dict):
              usage.get("completion_tokens") or 0))
 
 
+def _post_retry(url: str, payload: dict, headers: dict, tries: int = 4):
+    """429 限流退避重试（BigModel 并发限制）。"""
+    delay = 2
+    for _ in range(tries):
+        r = http().post(url, json=payload, headers=headers)
+        if r.status_code != 429:
+            return r
+        wait = int(r.headers.get("retry-after") or delay)
+        time.sleep(min(wait, 20))
+        delay = min(delay * 2, 20)
+    return r
+
+
 def bm_chat(messages: list[dict], *, json_mode: bool = False,
             max_tokens: int = 1800, temperature: float = 0.3) -> str:
     payload: dict[str, Any] = {
@@ -230,26 +265,22 @@ def bm_chat(messages: list[dict], *, json_mode: bool = False,
         "temperature": temperature, "max_tokens": max_tokens}
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
-    r = http().post(f"{CFG['api_base']}/chat/completions",
-                    json=payload, headers=_headers())
+    r = _post_retry(f"{CFG['api_base']}/chat/completions", payload, _headers())
     if r.status_code >= 400 and json_mode:
         payload.pop("response_format", None)
-        r = http().post(f"{CFG['api_base']}/chat/completions",
-                        json=payload, headers=_headers())
+        r = _post_retry(f"{CFG['api_base']}/chat/completions", payload, _headers())
     r.raise_for_status()
     data = r.json()
     _log_usage("chat", payload["model"], data.get("usage") or {})
     return data["choices"][0]["message"]["content"]
 
 
-def bm_embed(texts: list[str]) -> list[list[float]]:
+def bm_embed(texts: list[str], tries: int = 4) -> list[list[float]]:
     payload: dict[str, Any] = {"model": CFG["embed_model"], "input": texts}
-    r = http().post(f"{CFG['api_base']}/embeddings",
-                    json={**payload, "dimensions": CFG["embed_dim"]},
-                    headers=_headers())
+    r = _post_retry(f"{CFG['api_base']}/embeddings",
+                    {**payload, "dimensions": CFG["embed_dim"]}, _headers(), tries)
     if r.status_code >= 400:
-        r = http().post(f"{CFG['api_base']}/embeddings",
-                        json=payload, headers=_headers())
+        r = _post_retry(f"{CFG['api_base']}/embeddings", payload, _headers(), tries)
     r.raise_for_status()
     data = r.json()
     _log_usage("embed", payload["model"], data.get("usage") or {})
@@ -420,7 +451,7 @@ def do_search(q: str, k: int = 12) -> list:
             pass
     if CFG["api_key"]:
         try:
-            qv = np.asarray(bm_embed([q[:1000]])[0], dtype=np.float32)
+            qv = np.asarray(bm_embed([q[:1000]], tries=2)[0], dtype=np.float32)
             for j, (iid, score) in enumerate(VEC.search(qv, 30)):
                 rrf[iid] = rrf.get(iid, 0) + 1.0 / (60 + j)
         except Exception:
@@ -521,6 +552,38 @@ def do_digest(date: str = "") -> dict:
 def digest(request: Request, date: str = "", token: str = Query(default="")):
     auth(request, token)
     return do_digest(date)
+
+
+class AskIn(BaseModel):
+    q: str
+
+
+@app.post("/v1/ask")
+def ask(body: AskIn, request: Request, token: str = Query(default="")):
+    """RAG 问答：知识库检索 top5 → GLM 归纳作答（带来源）。"""
+    auth(request, token)
+    if not CFG["api_key"]:
+        raise HTTPException(503, "BIGMODEL_API_KEY 未配置")
+    hits = do_search(body.q, 5)
+    ctx_parts, srcs = [], []
+    with get_db() as db:
+        for i, h in enumerate(hits, 1):
+            r = db.execute(
+                "SELECT url, substr(raw_text,1,1500) head FROM items WHERE id=?",
+                (h["id"],)).fetchone()
+            if r is None:
+                continue
+            ctx_parts.append(f"[{i}] {h['title']} ({h['source']}) {r['url']}\n"
+                             f"{h.get('tldr') or ''}\n{r['head']}")
+            srcs.append({"id": h["id"], "title": h["title"], "url": r["url"]})
+    if not ctx_parts:
+        return {"answer": "知识库里还没有相关内容，先入库几篇再来问吧。", "sources": []}
+    ans = bm_chat([{"role": "user", "content":
+        "基于以下知识库片段回答问题。用中文：先给结论，再列依据；"
+        "片段信息不足时明确说明。引用来源用 [n] 标注。\n\n"
+        + "\n\n".join(ctx_parts) + f"\n\n问题：{body.q}"}],
+        max_tokens=1200, temperature=0.3)
+    return {"answer": ans, "sources": srcs}
 
 
 @app.get("/v1/tags")
