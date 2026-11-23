@@ -2,7 +2,7 @@
 import os
 import time
 
-from app import get_db, process_item
+from app import apply_settings, get_db, process_item
 
 POLL = int(os.environ.get("KB_WORKER_POLL", "5"))
 BATCH = int(os.environ.get("KB_WORKER_BATCH", "20"))
@@ -11,6 +11,10 @@ BATCH = int(os.environ.get("KB_WORKER_BATCH", "20"))
 def main():
     print(f"[worker] started, poll={POLL}s", flush=True)
     while True:
+        try:
+            apply_settings()  # 网页保存的新模型配置实时生效
+        except Exception:
+            pass
         with get_db() as db:
             rows = db.execute(
                 "SELECT id FROM items WHERE status='new' "

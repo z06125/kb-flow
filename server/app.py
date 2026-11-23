@@ -87,6 +87,7 @@ CREATE TABLE IF NOT EXISTS usage_log(
   prompt_tokens INTEGER NOT NULL DEFAULT 0,
   completion_tokens INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '');
 """
 
 
@@ -378,6 +379,7 @@ async def lifespan(_: FastAPI):
     os.makedirs(os.path.dirname(CFG["db"]), exist_ok=True)
     init_db()
     ensure_token()
+    apply_settings()
     VEC.load()
     yield
 
@@ -621,6 +623,116 @@ def stats(request: Request, token: str = Query(default="")):
     return {"items": {"total": sum(by_status.values()), **by_status},
             "sources": by_source, "tokens": {"by_model": tok, "total": total},
             "db_bytes": size}
+
+
+# ---------------------------------------------------------------- 模型设置（换 API 厂商入口）
+
+def meta_get(key: str) -> str:
+    with get_db() as db:
+        row = db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else ""
+
+
+def meta_set(key: str, value: str):
+    with get_db() as db:
+        db.execute("INSERT INTO meta(key,value) VALUES(?,?) "
+                   "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+
+
+def apply_settings():
+    """数据库里的设置优先于环境变量。"""
+    for mk, ck in {"api_base": "api_base", "api_key": "api_key",
+                   "chat_model": "chat_model",
+                   "embed_model": "embed_model"}.items():
+        v = meta_get("cfg_" + mk)
+        if v:
+            CFG[ck] = v
+    d = meta_get("cfg_embed_dim")
+    if d.isdigit():
+        CFG["embed_dim"] = int(d)
+    VEC.dirty = True
+
+
+REEMBED = {"running": False}
+
+
+class SettingsIn(BaseModel):
+    api_base: str = ""
+    api_key: str = ""
+    chat_model: str = ""
+    embed_model: str = ""
+    embed_dim: int = 0
+
+
+@app.get("/v1/settings")
+def get_settings(request: Request, token: str = Query(default="")):
+    auth(request, token)
+    k = CFG["api_key"]
+    return {"api_base": CFG["api_base"], "chat_model": CFG["chat_model"],
+            "embed_model": CFG["embed_model"], "embed_dim": CFG["embed_dim"],
+            "key_masked": (k[:6] + "…" + k[-4:]) if len(k) > 10 else "",
+            "reembed_running": REEMBED["running"]}
+
+
+@app.post("/v1/settings")
+def save_settings(inp: SettingsIn, request: Request, token: str = Query(default="")):
+    auth(request, token)
+    if inp.api_base.strip():
+        meta_set("cfg_api_base", inp.api_base.strip().rstrip("/"))
+        CFG["api_base"] = meta_get("cfg_api_base")
+    if inp.api_key.strip():
+        meta_set("cfg_api_key", inp.api_key.strip())
+        CFG["api_key"] = inp.api_key.strip()
+    if inp.chat_model.strip():
+        meta_set("cfg_chat_model", inp.chat_model.strip())
+        CFG["chat_model"] = inp.chat_model.strip()
+    if inp.embed_model.strip():
+        meta_set("cfg_embed_model", inp.embed_model.strip())
+        CFG["embed_model"] = inp.embed_model.strip()
+    if inp.embed_dim:
+        meta_set("cfg_embed_dim", str(inp.embed_dim))
+        CFG["embed_dim"] = inp.embed_dim
+    VEC.dirty = True
+    return {"ok": True}
+
+
+@app.post("/v1/settings/test")
+def test_settings(request: Request, token: str = Query(default="")):
+    auth(request, token)
+    try:
+        msg = bm_chat([{"role": "user", "content": "只回复四个字：连接正常"}],
+                      max_tokens=16, temperature=0)
+        emb = bm_embed(["连接测试"], tries=1)
+        return {"ok": True, "chat": msg[:60], "embed_dim": len(emb[0])}
+    except Exception as e:
+        msg = str(e)
+        if "429" in msg:
+            return {"ok": False,
+                    "error": "当前被限流（后台批量任务正占用额度）。等几分钟再试，"
+                             "或先在服务器上暂停流水线：docker compose stop worker"}
+        if "401" in msg or "invalid" in msg.lower() or "key" in msg.lower():
+            return {"ok": False, "error": "Key 无效或无权限，请检查 Key 与厂商是否匹配"}
+        return {"ok": False, "error": msg[:300]}
+
+
+def _reembed_job():
+    try:
+        REEMBED["running"] = True
+        from scripts.reembed import main as run_reembed
+        run_reembed()
+    except Exception as e:
+        print(f"[reembed-job] {e}", flush=True)
+    finally:
+        REEMBED["running"] = False
+
+
+@app.post("/v1/settings/reembed")
+def start_reembed(request: Request, token: str = Query(default="")):
+    auth(request, token)
+    if REEMBED["running"]:
+        return {"ok": False, "error": "已有重建任务进行中"}
+    threading.Thread(target=_reembed_job, daemon=True).start()
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------- Web UI

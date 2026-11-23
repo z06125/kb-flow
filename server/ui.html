@@ -96,6 +96,7 @@ border-radius:50%;animation:sp .8s linear infinite;vertical-align:-2px}
       <input id="q" type="search" placeholder="搜索标题 / 正文 / 语义（支持自然语言长句）…">
       <button class="primary" onclick="doSearch()">搜索</button>
     </div>
+    <button id="cfgbtn" title="模型设置（换 API 厂商）" style="padding:8px 10px">⚙️</button>
     <button id="theme" title="明暗切换" style="padding:8px 10px">🌓</button>
   </div>
   <div class="hsub">
@@ -122,6 +123,27 @@ border-radius:50%;animation:sp .8s linear infinite;vertical-align:-2px}
   <div style="display:flex;gap:8px;justify-content:flex-end">
     <button onclick="clipdlg.close()">取消</button>
     <button class="primary" id="c_go" onclick="doClip()">入库</button>
+  </div>
+</dialog>
+<dialog id="setdlg">
+  <h2>⚙️ 模型设置 · 换 API 厂商入口</h2>
+  <p class="dimm" style="margin:6px 0 14px">支持任何 OpenAI 兼容厂商（DeepSeek / Kimi / 通义千问 / 硅基流动…）。
+  填地址 + Key + 模型名，保存即生效。留空的项保持不变。</p>
+  <div class="fgrid">
+    <input id="s_base" type="text" placeholder="API 地址，如 https://api.deepseek.com/v1">
+    <input id="s_key" type="text" placeholder="API Key（留空 = 沿用已保存的）">
+    <div style="display:flex;gap:8px">
+      <input id="s_chat" type="text" placeholder="聊天模型名" style="flex:1">
+      <input id="s_embed" type="text" placeholder="向量模型名（可选）" style="flex:1">
+      <input id="s_dim" type="number" placeholder="维度" style="width:90px">
+    </div>
+  </div>
+  <p class="dimm" id="s_msg" style="min-height:20px;margin:8px 0"></p>
+  <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
+    <button onclick="testCfg()">测试连接</button>
+    <button onclick="reembed()" title="更换向量模型后点一次，几分钟内自动重建">重建全部向量</button>
+    <button class="primary" onclick="saveCfg()">保存</button>
+    <button onclick="setdlg.close()">关闭</button>
   </div>
 </dialog>
 <dialog id="dlg"></dialog>
@@ -296,6 +318,33 @@ async function doClip(){
 }
 function refresh(){loadStats();
   if(mode==="search")doSearch();else{offset=0;$("#list").innerHTML="";loadList();}}
+
+/* 模型设置入口 */
+$("#cfgbtn").onclick=async()=>{
+  const s=await api("/v1/settings");
+  $("#s_base").value=s.api_base;$("#s_chat").value=s.chat_model;
+  $("#s_embed").value=s.embed_model;$("#s_dim").value=s.embed_dim;
+  $("#s_key").value="";
+  $("#s_key").placeholder=s.key_masked?`已配置 (${s.key_masked})，留空沿用`:"尚未配置，请粘贴 Key";
+  $("#s_msg").textContent=s.reembed_running?"⚠️ 向量重建进行中，稍候…":"";
+  setdlg.showModal();};
+async function saveCfg(){
+  await api("/v1/settings",{method:"POST",body:JSON.stringify({
+    api_base:$("#s_base").value.trim(),api_key:$("#s_key").value.trim(),
+    chat_model:$("#s_chat").value.trim(),embed_model:$("#s_embed").value.trim(),
+    embed_dim:+$("#s_dim").value||0})});
+  $("#s_msg").textContent="✅ 已保存并即时生效（新条目将使用新模型）";
+  toast("设置已保存");loadStats();}
+async function testCfg(){
+  $("#s_msg").textContent="测试中（约 5 秒）…";
+  try{const r=await api("/v1/settings/test",{method:"POST",body:"{}"});
+  $("#s_msg").textContent=r.ok
+    ?`✅ 连接正常 · 聊天:「${r.chat}」 · 向量维度:${r.embed_dim}`
+    :`❌ ${r.error}`;}catch(e){$("#s_msg").textContent="❌ 测试请求失败";}}
+async function reembed(){
+  const r=await api("/v1/settings/reembed",{method:"POST",body:"{}"});
+  if(r.ok){$("#s_msg").textContent="🔄 向量重建已开始，后台运行几分钟，完成后语义搜索即用新模型";
+  toast("重建已开始");}else toast(r.error||"失败");}
 
 $("#chips").innerHTML=chipHTML();
 loadStats();loadList();
