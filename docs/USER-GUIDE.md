@@ -80,7 +80,10 @@ docker compose logs -f worker          # 知识卡流水线实时日志
 docker compose restart                 # 全部重启；或 restart worker/feeds/bot
 
 # 订阅源：编辑 data/feeds.json（JSON 数组，name/url/tags），1 小时内生效
-# 文档入库：把 pdf/epub/txt/md 传到 data/inbox/ 后执行
+# 投递箱自动化（Windows 计划任务每 30 分钟）：
+#   把 pdf/epub/txt/md 丢进 ~/.ai.json 里 inbox_dir 指定的文件夹即可，
+#   脚本 tools/inbox_sync.py 自动上传→入库→生成知识卡；去重记录 ~/.kb_inbox_seen.json
+# 手动文档入库：
 docker compose exec worker python scripts/ingest_docs.py
 # 深度加工（直到新增消耗达到目标 token 数）
 docker compose exec worker python scripts/deep_cards.py 2000000
