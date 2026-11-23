@@ -21,6 +21,8 @@ import secrets
 import sqlite3
 import threading
 import time
+from pathlib import Path
+
 from contextlib import asynccontextmanager, contextmanager
 from typing import Any, Optional
 
@@ -625,102 +627,6 @@ def stats(request: Request, token: str = Query(default="")):
 
 @app.get("/", response_class=HTMLResponse)
 def ui():
-    return _HTML
+    return (Path(__file__).resolve().parent / "ui.html").read_text(encoding="utf-8")
 
 
-_HTML = """<!doctype html><html lang=zh><head><meta charset=utf-8>
-<meta name=viewport content="width=device-width,initial-scale=1">
-<title>KB · 个人知识库</title><style>
-:root{--bg:#0f1115;--card:#171a21;--line:#262b36;--fg:#e6e9f0;--dim:#8b93a5;--acc:#5b8cff}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);
-font:15px/1.6 -apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif}
-.wrap{max-width:880px;margin:0 auto;padding:26px 16px}
-h1{font-size:20px;margin:0}.dim{color:var(--dim);font-size:13px}
-.bar{display:flex;gap:8px;margin:16px 0 8px}
-input,select,textarea,button{background:var(--card);border:1px solid var(--line);
-color:var(--fg);border-radius:8px;padding:9px 12px;font:inherit}
-input[type=search],input[type=text]{flex:1;min-width:0}
-button{cursor:pointer}button:hover{border-color:var(--acc)}
-.stats{display:flex;gap:14px;flex-wrap:wrap;margin:6px 0 14px}
-.item{background:var(--card);border:1px solid var(--line);border-radius:12px;
-padding:13px 16px;margin:10px 0;cursor:pointer}.item:hover{border-color:var(--acc)}
-.item .t{font-weight:600}.item .s{font-size:13px;color:var(--dim);margin-top:4px}
-.item .m{font-size:12px;color:var(--dim);margin-top:6px}
-mark{background:#3a2b00;color:#ffd76a}
-dialog{background:var(--card);color:var(--fg);border:1px solid var(--line);
-border-radius:14px;max-width:780px;width:92vw;padding:22px}
-dialog::backdrop{background:rgba(0,0,0,.65)}
-pre{white-space:pre-wrap;word-break:break-word;background:var(--bg);
-border:1px solid var(--line);border-radius:8px;padding:10px;font-size:13px;
-max-height:280px;overflow:auto}li{margin:4px 0}
-.chip{display:inline-block;background:var(--bg);border:1px solid var(--line);
-border-radius:999px;padding:0 10px;font-size:12px;color:var(--dim);
-margin:0 6px 4px 0;cursor:pointer}
-form.clip input,form.clip textarea{width:100%;margin-bottom:6px}
-</style></head><body><div class=wrap>
-<h1>📚 KB · 个人知识库</h1>
-<div class=dim>GLM 知识卡流水线 —— <span id=stat>加载中…</span></div>
-<div class=bar>
-<input id=q type=search placeholder="搜索知识库（全文 + 语义混合检索）…">
-<select id=src><option value=>全部来源</option><option>clip</option>
-<option>rss</option><option>tg</option><option>doc</option><option>book</option></select>
-<button onclick=doSearch()>搜索</button>
-<button onclick=toggleClip() title=手动剪藏>✚</button>
-<button onclick=loadList() title=最新列表>↺</button></div>
-<form class=clip id=clipbox style=display:none onsubmit="return doClip(event)">
-<input id=c_title type=text placeholder="标题（可留空，默认取首行）">
-<input id=c_url type=text placeholder="来源 URL（可留空）">
-<textarea id=c_text placeholder="粘贴正文（≥20字）…"></textarea>
-<button>入库并生成知识卡</button> <span class=dim id=c_msg></span></form>
-<div class="stats dim" id=stats></div><div id=list></div></div>
-<dialog id=dlg></dialog><script>
-const $=s=>document.querySelector(s);
-let TOKEN=localStorage.kbtoken||"";
-if(!TOKEN){TOKEN=prompt("输入访问令牌（服务器 /opt/kb/.env 中 KB_TOKEN）")||"";
-localStorage.kbtoken=TOKEN;}
-async function api(p,o={}){o.headers=Object.assign({"X-API-Token":TOKEN,
-"Content-Type":"application/json"},o.headers||{});const r=await fetch(p,o);
-if(r.status==401){localStorage.removeItem("kbtoken");location.reload();throw 0;}
-return r.json();}
-const esc=s=>(s||"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
-function cardHTML(d,snippet){
-  const tl=snippet?snippet:esc(d.tldr||"");
-  return `<div class=item onclick=view(${d.id})><div class=t>${esc(d.title)}</div>
-  <div class=s>${tl}</div><div class=m>#${d.id} · ${esc(d.source)} · ${d.created_at}
-  ${(d.tags||[]).slice(0,4).map(t=>` <span class=chip>${esc(t)}</span>`).join("")}</div></div>`;}
-async function loadStats(){try{const s=await api("/v1/stats");
-$("#stat").textContent=`${(s.items.done||0)} 条已入库 · 累计消耗 ${(s.tokens.total/1e6).toFixed(2)}M tokens`;
-$("#stats").innerHTML=Object.entries(s.sources).map(([k,v])=>`<span class=chip>${k}: ${v}</span>`).join("");}catch(e){}}
-async function loadList(){const d=await api("/v1/items?limit=40");
-$("#list").innerHTML=d.items.map(x=>cardHTML(x)).join("")||"<p class=dim>空空如也，去剪藏第一条吧。</p>";}
-async function doSearch(){const q=$("#q").value.trim();if(!q)return loadList();
-const src=$("#src").value;const d=await api("/v1/search?q="+encodeURIComponent(q)+"&k=20");
-let items=d.items.filter(x=>!src||x.source==src);
-$("#list").innerHTML=items.map(x=>cardHTML(x,x.snippet)).join("")||"<p class=dim>无结果。</p>";}
-async function view(id){const d=await api("/v1/item/"+id);const c=d.card||{};
-const li=a=>(a||[]).map(x=>`<li>${esc(x)}</li>`).join("");
-$("#dlg").innerHTML=`<h2 style="margin-top:0">${esc(d.title)}</h2>
-<p class=dim>#${d.id} · ${esc(d.source)} · ${d.created_at} · ${esc(d.url||"本地内容")}
-${d.status!="done"?` · 状态:${d.status} ${esc(d.error)}`:""}</p>
-<p><b>${esc(c.tldr||"")}</b></p><ul>${li(c.points)}</ul>
-${(c.quotes||[]).length?`<blockquote style="border-left:3px solid var(--acc);margin:10px 0;padding:2px 12px;color:var(--dim)">${c.quotes.map(q=>`<p>「${esc(q)}」</p>`).join("")}</blockquote>`:""}
-<div>${(c.tags||[]).map(t=>`<span class=chip onclick='qsearch("${esc(t)}")'>${esc(t)}</span>`).join("")}</div>
-<h3>值得深挖</h3><ul>${li(c.questions)}</ul>
-<details><summary class=dim>原文</summary><pre>${esc(d.raw_text)}</pre></details>
-<p><button onclick=del1(${d.id})>删除</button> <button onclick=dlg.close()>关闭</button></p>`;
-dlg.showModal();}
-function qsearch(t){dlg.close();$("#q").value=t;doSearch();}
-async function del1(id){if(!confirm("确认删除？"))return;await api("/v1/item/"+id,{method:"DELETE"});
-dlg.close();loadList();loadStats();}
-function toggleClip(){const b=$("#clipbox");b.style.display=b.style.display=="none"?"block":"none";}
-async function doClip(e){e.preventDefault();const t=$("#c_text").value.trim();
-if(t.length<20){$("#c_msg").textContent="正文太短";return false;}
-$("#c_msg").textContent="处理中（摘要+向量，约10秒）…";
-const r=await api("/v1/clip",{method:"POST",body:JSON.stringify({
-text:t,url:$("#c_url").value.trim(),title:$("#c_title").value.trim(),source:"clip"})});
-$("#c_msg").textContent=r.dup?`重复，已存在 #${r.id}`:`✅ 已入库 #${r.id}`;
-if(!r.dup){$("#c_text").value="";$("#c_url").value="";$("#c_title").value="";
-loadStats();setTimeout(loadList,2000);}return false;}
-$("#q").addEventListener("keydown",e=>{if(e.key=="Enter")doSearch();});
-loadStats();loadList();
-</script></body></html>"""
